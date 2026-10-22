@@ -105,9 +105,30 @@ Single settings source:
 
 The embedding model must match what was used at ingest time — changing it invalidates existing indexes. `config.json` holds an API token: keep it `chmod 600`.
 
-## Updating / Deploying a New Build
+## Development & Packaging
 
-Extract or copy over your existing `~/.opencode/plugins/docs-rag/`, keeping its `data/` directory (corpus + indexes) intact — everything else in the tree is code/config and safe to replace.
+The dev checkout adds TypeScript sources (`src/*.ts`) plus a Makefile pipeline; development builds go into this folder's own `dist/`.
+
+- **`make all`** (default) — build + test in the repo root: `npm ci`, then `tsc` → local `dist/`; JS validation that `dist/index.js` loads with a default export whose `setup()` is callable, followed by the smoke test (`node test/sanity.js`)
+- **`make build`** / **`make test`** — either half separately (test depends on build)
+
+### Packaging → tarball
+
+```sh
+make package    # = clean stage stage-install stage-build stage-pack prune
+```
+
+1. `clean` wipes the local `dist/` and any stale staging dir
+2. `stage` rsyncs only shippable files (`index.js`, docs, config.json, package*.json, tsconfig.json, src/, python/) into a temp copy with Python caches stripped — no corpus/state leaves this folder
+3. inside the staged copy: full install via `npm ci`, TypeScript build, then **sources are deleted** (the tarball ships compiled JS + engines only)
+4. `stage-pack` runs `npm pack` there and moves the artifact to local `dist/`; staging dir removed
+
+Artifact: `docs-rag-<version>.tgz` in this folder's `dist/`.
+
+### Deploying a new build
+
+Extract or copy over your existing `~/.opencode/plugins/docs-rag/`, keeping its
+`data/` directory (corpus + indexes) intact — tarballs never contain one. Everything else is code/config and safe to replace; restart OpenCode so the updated plugin loads.
 
 ## Limitations
 
