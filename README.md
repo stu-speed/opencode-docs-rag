@@ -1,41 +1,28 @@
-# docs‑rag — OpenCode Plugin
+# docs‑rag — OpenCode Plugin v2
 
-A self‑contained, prompt‑driven retrieval‑augmented generation (RAG) system for OpenCode.  
-Everything lives inside one plugin directory — no MCP, no slash commands, no external services beyond LM Studio for embeddings.
+Self-contained, prompt-driven RAG over your local document corpus: no MCP server and no external services beyond LM Studio for embeddings. Code, settings, state, and the whole corpus live inside one plugin directory under `~/.opencode/plugins/docs-rag/`.
 
----
+## What it provides
 
-## Overview
+- Per-subject hybrid retrieval — dense FAISS (`IndexIDMap2`) + SQLite FTS5 BM25 keyword search, fused with reciprocal rank fusion
+- Optional local ONNX cross‑encoder rerank (CPU; weights cached under `data/models/<model>/`, skipped offline)
+- Incremental ingest pipeline: documents → markdown sections, tables → rows — all stored as unified chunks keyed by content hash. Re-ingesting an edited file updates only changed chunks
 
-`docs‑rag` provides:
+## Tools
 
-- Hybrid dense + keyword retrieval
-  - FAISS (`IndexIDMap2`, per‑subject)
-  - SQLite (metadata, chunk registry, FTS5 keyword index)
-- LM Studio embeddings (the main model answers; the tool returns context blocks)
-- Local ONNX cross‑encoder reranker (CPU)
-- Incremental ingest pipeline (documents + tables → unified rows)
-- Natural-language routing via `AGENTS.md` (registered as an OpenCode skill through `package.json`)
-
-Six tools:
+Three tools in v2. All reject undocumented keys (`additionalProperties: false`). Subject names must match `[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}` and exist under `data/subjects`.
 
 | Tool | Purpose | Input |
 |------|---------|-------|
-| `docs_rag_enable`   | Enable one or more subjects            | `{ "subjects": ["X", ...] }` (required, plural) |
-| `docs_rag_disable`  | Disable all subjects                   | `(no arguments)` — clears every session |
-| `docs_rag_status`   | Report active subjects                 | `(no arguments)` |
-| `docs_rag_ingest`   | Add files to a subject                 | `{ "subject": "X", "files": ["Y.pdf"], "description"?: "..." }` |
-| `docs_rag_forget`   | Remove files from a subject            | `{ "subject": "X", "files": ["Y.pdf"] }` (filenames in that subject's raw dir) |
-| `docs_rag_query`    | Hybrid search, returns context blocks  | `{ "question": "...", "subject"? }` (singular optional subject) |
+| `docs_rag_ingest`  | Add files to a subject      | `{ "subject": "x", "files": ["/abs/path/a.pdf"], "description"? }` — sources are copied into `<data>/subjects/x/raw/`; refuses overwrites, rejects duplicate paths in one call; optional `"description"` is stored as document metadata. Returns per-file results. |
+| `docs_rag_forget`  | Remove files from a subject | `{ "subject": "x", "files": ["a.pdf"] }` — matches by filename inside that subject's raw dir (no paths). Index updated first; the file is deleted only on success, so a failed forget leaves your corpus intact. |
+| `docs_rag_query`   | Hybrid search → context blocks | `{ "question": "...", "subject"? }`, or `"subjects"?: ["x","y"]`. **At least one subject is required** — singular string or plural array; neither present returns an error telling you to name subjects. The main model answers from the returned context blocks (up to `top_k`). |
 
-The plugin is fully self-contained: code, settings, state, and corpus all live inside the package directory.
+v2 selection is stateless: v1's enable/disable/status tools and persisted *active-subjects* list are gone, so every query names its subject(s) explicitly — which also keeps RAG out of prompts that don't ask for it.
 
----
+## Installation & Requirements
 
-## Installation
-
-1. Copy (or extract) the built plugin into OpenCode's local plugins dir so that
-   `~/.opencode/plugins/docs-rag/` contains a node module with an entry point at its root:
+Copy the built plugin into OpenCode's local plugins dir with an entry point at its root:
 
 ```
 ~/.opencode/plugins/docs-rag/
@@ -43,180 +30,57 @@ The plugin is fully self-contained: code, settings, state, and corpus all live i
 └── dist/, python/, config.json, package.json, AGENTS.md, ...
 ```
 
-2. That's it — OpenCode v2 auto-discovers plugins in `~/.opencode/plugins/`.  
-   No entry is needed in `opencode.json`, no MCP server to configure.
+That's it — OpenCode auto-discovers `~/.opencode/plugins/*/`. No entry in `opencode.json`, no MCP server. The natural-language routing skill is registered via `"opencode.skills"` in `package.json` (points at `AGENTS.md`). Legacy v1 installs that listed the plugin under a `"plugins"` array can drop it — ignored by discovery.
 
-> Legacy (v1) installs registered the plugin via a `"plugins"` array pointing at
-> an older path; remove that if migrating — it's ignored by v2 discovery.
+Python 3 with:
+- Required: `faiss-cpu`, `pandas`; plus `openpyxl` for Excel tables, and `onnxruntime` (rerank) if enabled in config
+- PDFs: optional but recommended `marker-pdf`. Conversion chain per file: `marker_single --mode fast` → fallback `pymupdf4llm` → last resort `markitdown`; legacy `.doc` is best-effort plain text only
 
-### Requirements
-
-- `python3` with:
-  - `faiss-cpu`
-  - `pandas`
-  - `openpyxl`
-  - `markitdown`
-  - `onnxruntime`
-- Optional (recommended for PDFs):
-  - `marker-pdf` (`marker_single --mode fast`)
-- LM Studio reachable for embeddings (URL/model/token in `config.json`)
-
-Activate your venv before launching OpenCode so the plugin inherits the correct interpreter.
-
----
+LM Studio must be reachable at the URL in `config.json`. Activate your venv before launching OpenCode so the plugin inherits the correct interpreter.
 
 ## Directory Layout
 
 ```
 docs-rag/
-├── index.js              # entry stub → dist/index.js
-├── dist/                 # compiled plugin (index.js, tools.js, router.js)
-├── src/                  # TypeScript sources (dev only)
-├── python/               # ingest/query/forget engines + rag helpers
-├── AGENTS.md             # skill: routing + phrasing rules (auto-registered via package.json "opencode.skills")
-├── config.json           # LM Studio + search/rerank settings (chmod 600)
-└── data/                 # persistent corpus, indexes, and runtime state
-    ├── subjects/<subject>/
-    │   ├── raw/          # source files as ingested (markdown/pdf/etc.)
-    │   ├── json/         # normalized rows per file (<name>.md.json)
-    │   └── index/        # FAISS index for this subject
-    ├── models/<model>/   # cached ONNX reranker weights
-    └── db/rag.db         # SQLite store (chunks, FTS5, metadata)
+├── index.js              # entry stub → dist/index.js (tools + Python router)
+├── dist/                 # compiled plugin (index, tools, router)
+├── python/               # ingest/query/forget engines + rag helpers; each tool spawns `python3 <name>.py` with JSON args (128 KiB output cap per call)
+├── AGENTS.md             # skill: subject-selection routing rules (auto-registered via package.json "opencode.skills")
+├── config.json           # LM Studio + search/rerank settings — holds an API token, keep chmod 600
+└── data/                 # persistent corpus, indexes; survives plugin upgrades if you preserve it on deploy
+    ├── subjects/<subject>/raw|json|index   # source files as ingested · normalized rows (<name>.md.json) · FAISS index for this subject
+    ├── models/<model>/                     # cached ONNX reranker weights
+    └── db/rag.db                           # SQLite store: subjects, documents, chunks (+ FTS5 virtual table `chunks_fts`)
 ```
 
-Active-subject state is kept in the plugin's own storage (`ctx.storage`, key
-`active_subjects`) — **it persists across sessions and restarts**. There is no
-per-startup reset: once enabled, RAG stays ON until `docs_rag_disable`.
+There is no runtime state outside `data/` — v1's persisted active-subjects key was removed with the enable/disable tools.
 
----
+## Usage & Routing (per AGENTS.md)
 
-## Using the Plugin
+RAG runs only when a subject is explicitly selected in your prompt:
 
-Natural language drives everything.  
-The skill in `AGENTS.md` maps phrases to tools (store-mutating phrases require the noun **“docs”**).
+- “docs subject X” / “docs subject X,Y” → query those subjects
+- “… docs for/on/for <subject> …”, or naming one or more subjects anywhere, also triggers `docs_rag_query` with them
+- No named subject (e.g. “how do I inject METAR”) → **no** tool call; normal conversation
 
-### Enable / Disable / Status
+Ingest and forget are store-mutating: use direct requests (“add this PDF to the xplane docs”, “remove a.md from reports”). `docs_rag_ingest` copies your files into the subject's raw dir first, so originals elsewhere stay untouched.
 
-| Phrase | Tool call |
-|--------|-----------|
-| “enable docs X”   | `docs_rag_enable { "subjects": ["X"] }`  — plural array, one or more |
-| “disable docs”    | `docs_rag_disable {}`                    — no args; clears **all** subjects for every session |
-| “docs status”     | `docs_rag_status {}`                     |
+## Query Pipeline (per named subject)
 
-### Ingest / Forget
+1. Embed question via LM Studio; each subject's index is validated against config's embedding model before searching
+2. Dense FAISS search per-subject, pooled to `pool_k` candidates
+3. Keyword BM25 search (FTS5, Porter stemming; rare terms anchor the pool with OR fallback) when `use_fts` — then reciprocal rank fusion over the combined pools
+4. Optional ONNX cross‑encoder rerank of top `candidates`, and doc-hit coverage sort by query-term presence in chunk body + metadata
+5. Return up to `top_k` context blocks
 
-| Phrase | Tool call |
-|--------|-----------|
-| “ingest docs the-report.pdf into reports”   | `docs_rag_ingest { "subject": "reports", "files": ["/path/to/the-report.pdf"] }` — files are copied into the subject's raw dir; optional `"description"` is stored as doc metadata |
-| “forget docs the-report.pdf from reports”   | `docs_rag_forget { "subject": "reports", "files": ["the-report.pdf"] }` — matches by filename in that subject's raw dir (index updated first, then file removed) |
-
-### Query
-
-Search all active subjects — omit `"subject"` entirely. Or pass the **singular, optional** key to narrow one subject (e.g. `{ "subject": "fshd", "question": "..." }`). Note: `additionalProperties` is rejected by every tool call — only documented keys are accepted (`subjects`, plural, exists on `_enable`; query takes singular `"subject"`).
-
-The main model answers using the returned context blocks; with no active
-subjects and no explicit `"subject"` it returns an error telling you to enable one first.
-
----
+Answering etiquette (from the skill): cite sources only when provenance matters; if retrieved context is insufficient, fill from own knowledge or the web — say so outright when nothing answers it.
 
 ## Ingest Pipeline
 
-### Stage 1 — Normalize Input
-
-Documents → markdown  
-Tables → DataFrame rows
-
-Supported formats:
-
-- Documents: `.md`, `.txt`, `.rst`, `.tex`, `.adoc`, `.org`, `.log`, `.pdf`, `.docx`, `.pptx`, `.html`, `.epub`
-- Tables: CSV/TSV, Excel, parquet/feather/ORC, pickle, JSON records
-
-PDFs use:
-
-1. `marker_single --mode fast`
-2. fallback: `pymupdf4llm`
-3. fallback: `markitdown`
-
-### Stage 2 — Unified Rows
-
-Everything becomes rows stored in SQLite + FAISS:
-
-- `id` = stable content hash  
-- `text` = JSON with section or record content  
-- `doc_meta` = leading-context metadata (title, abstract, or table columns)
-
-Sections > `chunk_chars` (default 2000) are split; code fences are preserved.
-Re-ingesting edited markdown updates only changed chunks (incremental by hash).
-
----
-
-## Tools — Behavior Notes
-
-### `docs_rag_query`
-Hybrid search:
-
-1. Resolve subjects → explicit `"subject"`, else all active  
-2. Validate subject embedding model matches config  
-3. Embed question via LM Studio  
-4. Dense FAISS search (per-subject index, pooled to `pool_k`)  
-5. Keyword BM25 search (FTS5) when enabled  
-6. Reciprocal rank fusion over the pool  
-7. Optional ONNX cross-encoder rerank of top candidates  
-8. Doc-hit coverage sort; return up to `top_k` context blocks
-
-### `docs_rag_enable` / `_disable` / `_status`
-Manage the persisted `active_subjects` list: enable is a set (deduped, validated), disable removes it entirely — there is no per-subject disable in v2. Subject names must match `[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}` and exist under `data/subjects`.
-
-### `docs_rag_ingest`
-Copies sources into the subject's raw dir (refuses to overwrite), then runs the Python ingest engine; returns per-file results. Duplicate paths in one call are rejected.
-
-### `docs_rag_forget`
-Updates indexes first, deletes matched files only after success — a failed forget leaves your corpus intact.
-
----
-
-## Query Behavior
-
-- RAG ON (active subjects) + question → answer from retrieved blocks  
-  - No “the corpus says…” framing; cite sources only when provenance matters  
-  - Insufficient context → fill from own knowledge or the web  
-  - Nothing answers it → say so
-- Tasks/instructions that don't need docs → normal conversation, no tool call
-
----
-
-## Retrieval Internals
-
-### Dense
-FAISS `IndexIDMap2` over normalized cosine similarity.
-
-### Keyword
-FTS5 BM25 with Porter stemming.  
-Rare terms anchor the pool; fallback to OR query.
-
-### Fusion
-Reciprocal rank fusion (RRF).
-
-### Rerank
-Local ONNX cross-encoder (`ms-marco-MiniLM-L6-v2`).  
-Cached under `data/models/<model>/`.
-
-### Doc-hits
-Coverage-first stable sort by query-term presence in chunk body + metadata.
-
----
-
-## SQLite Schema
-
-- `subjects`
-- `documents`
-- `chunks`
-- `chunk_ids`
-- `chunks_fts` (FTS5)
-
-Indexes are written atomically.
-
----
+- **Stage 1 — normalize:** documents → markdown (`.md`, `.txt` read directly), tables → DataFrame rows
+  - Documents: `.rst`, `.tex`, `.adoc`, `.org`, `.log`, `.pdf`, `.docx`, `.pptx`, `.html`, `.epub` via markitdown; PDFs through the chain above
+  - Tables: CSV/TSV, Excel (openpyxl), parquet/feather/ORC, pickle, JSON records — via pandas
+- **Stage 2 — unified rows:** every section or record becomes a row in SQLite + FAISS with `id` = stable content hash, `text` = the section/record as JSON, and leading-context metadata (title, abstract, table columns). Sections longer than `chunk_chars` are split; code fences preserved.
 
 ## Configuration (`config.json`)
 
@@ -224,51 +88,29 @@ Single settings source:
 
 ```jsonc
 {
-  "lmstudio": {
-    "url": "...",
-    "embed_model": "...",
-    "token": "..."
-  },
+  "lmstudio": { "url": "...", "embed_model": "...", "token": "..." },
   "data_dir": "data",
-  "search": { "top_k": 8, "pool_k": 50, "rrf_k": 60, "use_fts": true },
-  "rerank": {
-    "enabled": true,
-    "model": "cross-encoder/ms-marco-MiniLM-L6-v2",
-    "candidates": 30,
-    "max_tokens": 256
-  },
-  "http_timeout": 120,
-  "embed_batch": 256,
-  "chunk_chars": 2000,
-  "doc_meta": {
+  "search":   { "top_k": 8, "pool_k": 50, "rrf_k": 60, "use_fts": true },
+  "rerank":   { "enabled": true, "model": "cross-encoder/ms-marco-MiniLM-L6-v2", "candidates": 30, "max_tokens": 256 },
+  "http_timeout": 120,       // seconds for LM Studio calls (engine side); Python router itself times out at 30 min per call
+  "embed_batch": 256,        // chunks embedded per request during ingest/query
+  "chunk_chars": 2000,       // split threshold in stage 2
+  "doc_meta":   {            // leading-context metadata captured for each document
     "max_chars": 1500,
     "preamble_sections": ["Abstract"],
-    "per_subject": {}
+    "per_subject": {}        // per-subject overrides of the above
   }
 }
 ```
 
-Embedding model must match the one used at ingest time.  
-`config.json` holds an API token — keep it `chmod 600`.
+The embedding model must match what was used at ingest time — changing it invalidates existing indexes. `config.json` holds an API token: keep it `chmod 600`.
 
----
+## Updating / Deploying a New Build
 
-## Development & Packaging (dev folder)
-
-The dev checkout keeps TypeScript sources plus a Makefile pipeline:
-
-- `make build` / `make all` → npm ci, tsc into `dist/`, then JS validation + smoke test (`test/sanity.js`)
-- `make package` → clean stage copy of the shippable files (index stub, docs, config, src/, python/) without dev artifacts, installs deps in staging, builds there, drops sources from the staged build, and produces `dist/docs-rag-X.Y.Z.tgz` via npm pack
-
-To deploy a new tarball: extract it over your existing
-`~/.opencode/plugins/docs-rag/`, keeping its `data/` directory (corpus + indexes) intact.
-
----
+Extract or copy over your existing `~/.opencode/plugins/docs-rag/`, keeping its `data/` directory (corpus + indexes) intact — everything else in the tree is code/config and safe to replace.
 
 ## Limitations
 
-- PDF conversion quality varies with layout; scanned PDFs need OCR first.
-- Word “Title” style is not a heading; use Heading 1.
-- Legacy `.doc` unsupported.
-- Deleting a subject's index breaks queries until re-ingest.
-- ONNX reranker downloads model on first use; offline → rerank skipped.
+- PDF conversion quality varies with layout; scanned PDFs need OCR first
+- Word “Title” style isn't a heading — use Heading 1 for structure
+- Deleting a subject's index breaks queries until re-ingest of that subject
