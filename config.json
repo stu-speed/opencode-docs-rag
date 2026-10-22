@@ -1,0 +1,28 @@
+{
+  "lmstudio": {
+    "url": "http://starology.synology.me:1234/v1",
+    "embed_model": "text-embedding-nomic-embed-text-v1.5",
+    "token": "sk-lm-kFjzYm5h:ToJEAfszjVM8LnU5byqy"
+  },
+  "data_dir": "data",
+  "search": {
+    "top_k": 8,
+    "pool_k": 50,
+    "rrf_k": 60,
+    "use_fts": true
+  },
+  "rerank": {
+    "enabled": true,
+    "model": "cross-encoder/ms-marco-MiniLM-L6-v2",
+    "candidates": 30,
+    "max_tokens": 256
+  },
+  "http_timeout": 120,
+  "embed_batch": 256,
+  "chunk_chars": 2000,
+  "doc_meta": {
+    "max_chars": 1500,
+    "preamble_sections": ["Abstract"],
+    "per_subject": {}
+  }
+}
