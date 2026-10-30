@@ -7,11 +7,13 @@ import faiss
 import numpy as np
 
 from .config import (
+    embed_backend,
     embed_batch,
     embed_model,
     http_timeout,
     lmstudio_token,
     lmstudio_url,
+    local_embed_model,
 )
 
 LMSTUDIO_BASE = lmstudio_url()
@@ -20,6 +22,7 @@ LMSTUDIO_TOKEN = lmstudio_token()
 
 HTTP_TIMEOUT = http_timeout()
 EMBED_BATCH = embed_batch()
+EMBED_BACKEND = embed_backend()
 
 
 def _http_json(url, payload=None):
@@ -46,18 +49,109 @@ def _http_json(url, payload=None):
         ) from e
 
 
-def resolve_embed_model():
+# ---------------------------------------------------------------------------
+# Local backend (fastembed, in-process ONNX — HTTP-free)
+# ---------------------------------------------------------------------------
+_LOCAL_EMBEDDER = None     # lazy TextEmbedding singleton
+_LOCAL_MODEL_ID = ""       # fastembed model id backing the singleton
+
+
+def _check_backend():
+    if EMBED_BACKEND not in ("http", "local"):
+        raise RuntimeError(
+            f"Unknown embeddings.backend {EMBED_BACKEND!r} "
+            "(config or RAG_EMBED_BACKEND). Use \"http\" or \"local\"."
+        )
+    return EMBED_BACKEND
+
+
+def _supported_local_models():
+    """Supported fastembed model ids (built-in catalogue)."""
+    from fastembed import TextEmbedding
+    return [str(m["model"]) for m in TextEmbedding.list_supported_models()]
+
+
+def _map_local_model(model):
     """
-    The configured embedding model. Required, used as-is: there is no
-    auto-detection and no fallback across loaded models.
+    Map the canonical embedding model name (lmstudio.embed_model, e.g.
+    "text-embedding-nomic-embed-text-v1.5") to a fastembed model id.
+    embeddings.local_model wins when set; otherwise accept an exact
+    id, then match a catalogue id ending in "/<name>".
     """
-    if not EMBED_MODEL:
+    configured = local_embed_model()
+    if configured:
+        return configured
+    if not (model or "").strip():
         raise RuntimeError(
             "Embedding model is not configured. Set lmstudio.embed_model in the "
             "docs-rag config.json (or the LMSTUDIO_EMBED_MODEL environment "
-            "variable) naming the model used for ingest and query."
+            "variable), or set embeddings.local_model to a fastembed id such "
+            "as 'nomic-ai/nomic-embed-text-v1.5'."
         )
-    return EMBED_MODEL
+    candidates = [model]
+    stripped = model[len("text-embedding-"):] if model.startswith("text-embedding-") else model
+    if stripped != model:
+        candidates.append(stripped)
+    supported = [s.lower() for s in _supported_local_models()]
+    for cand in (c.lower() for c in candidates if c):
+        if cand in supported:
+            return cand
+        for supp in supported:
+            if supp.endswith("/" + cand):
+                return supp
+    raise RuntimeError(
+        f"Cannot map embedding model {model!r} to a fastembed model. "
+        "Set embeddings.local_model in the docs-rag config.json (or "
+        "RAG_EMBED_LOCAL_MODEL) to a fastembed id such as "
+        "'nomic-ai/nomic-embed-text-v1.5'."
+    )
+
+
+def _local_embedder(model):
+    """Lazy fastembed TextEmbedding for the resolved model id (cached)."""
+    global _LOCAL_EMBEDDER, _LOCAL_MODEL_ID
+    model_id = _map_local_model(model)
+    if _LOCAL_EMBEDDER is None or _LOCAL_MODEL_ID != model_id:
+        try:
+            from fastembed import TextEmbedding
+        except ImportError as e:
+            raise RuntimeError(
+                "embeddings.backend is \"local\" but fastembed is not installed. "
+                "Run `pip install fastembed` (onnxruntime only, no torch), or "
+                "set embeddings.backend to \"http\"."
+            ) from e
+        _LOCAL_EMBEDDER = TextEmbedding(model_name=model_id)
+        _LOCAL_MODEL_ID = model_id
+    return _LOCAL_EMBEDDER
+
+
+def _embed_local(prefixed, model):
+    """
+    Embed already-prefixed texts in-process via fastembed. fastembed applies
+    no task prefixes itself, so the caller's prep_for_embed() output is used
+    as-is. Raw vectors are already L2-normalized; normalized again for parity.
+    """
+    out = np.asarray(list(_local_embedder(model).embed(prefixed, batch_size=EMBED_BATCH)), dtype="float32")
+    norms = np.linalg.norm(out, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return out / norms
+
+
+def resolve_embed_model():
+    """
+    The configured embedding model. Required, used as-is: there is no
+    auto-detection and no fallback across loaded models. On the local backend
+    a fastembed model id is accepted as the canonical name.
+    """
+    if EMBED_MODEL:
+        return EMBED_MODEL
+    if _check_backend() == "local":
+        return _map_local_model("")
+    raise RuntimeError(
+        "Embedding model is not configured. Set lmstudio.embed_model in the "
+        "docs-rag config.json (or the LMSTUDIO_EMBED_MODEL environment "
+        "variable) naming the model used for ingest and query."
+    )
 
 
 def task_prefix(model, task):
@@ -78,7 +172,8 @@ def prep_for_embed(text, model, task):
 
 def embed(texts, model=None, task=None):
     """
-    Embed one or more texts via LM Studio.
+    Embed one or more texts — over HTTP (LM Studio, OpenAI-compatible
+    /embeddings) or in-process via fastembed, per embeddings.backend.
 
     Returns an L2-normalized float32 array of shape (n, dim). Normalization
     is required because the index uses inner product (IndexFlatIP), so
@@ -91,9 +186,12 @@ def embed(texts, model=None, task=None):
         texts = [texts]
     model = model or resolve_embed_model()
     prefix = task_prefix(model, task)
+    prefixed = [prefix + t for t in texts]
+    if _check_backend() == "local":
+        return _embed_local(prefixed, model)
     data = _http_json(
         f"{LMSTUDIO_BASE}/embeddings",
-        {"model": model, "input": [prefix + t for t in texts]},
+        {"model": model, "input": prefixed},
     )
     items = sorted(data["data"], key=lambda d: d["index"])
     arr = np.asarray([item["embedding"] for item in items], dtype="float32")

@@ -34,9 +34,10 @@ That's it — OpenCode auto-discovers `~/.opencode/plugins/*/`. No entry in `ope
 
 Python 3 with:
 - Required: `faiss-cpu`, `pandas`; plus `openpyxl` for Excel tables, and `onnxruntime` (rerank) if enabled in config
+- Optional: `fastembed` — needed for `embeddings.backend: "local"` (in-process ONNX embeddings, no torch)
 - PDFs: optional but recommended `marker-pdf`. Conversion chain per file: `marker_single --mode fast` → fallback `pymupdf4llm` → last resort `markitdown`; legacy `.doc` is best-effort plain text only
 
-LM Studio must be reachable at the URL in `config.json`. Activate your venv before launching OpenCode so the plugin inherits the correct interpreter.
+LM Studio must be reachable at the URL in `config.json` when `embeddings.backend` is `"http"` (the default for fresh installs; `"local"` runs offline after a one-time model download). Activate your venv before launching OpenCode so the plugin inherits the correct interpreter.
 
 ## Directory Layout
 
@@ -67,7 +68,7 @@ Ingest and forget are store-mutating: use direct requests (“add this PDF to th
 
 ## Query Pipeline (per named subject)
 
-1. Embed question via LM Studio; each subject's index is validated against config's embedding model before searching
+1. Embed question — via fastembed in-process (`embeddings.backend: "local"`) or via LM Studio (`"http"`); each subject's index is validated against config's embedding model before searching
 2. Dense FAISS search per-subject, pooled to `pool_k` candidates
 3. Keyword BM25 search (FTS5, Porter stemming; rare terms anchor the pool with OR fallback) when `use_fts` — then reciprocal rank fusion over the combined pools
 4. Optional ONNX cross‑encoder rerank of top `candidates`, and doc-hit coverage sort by query-term presence in chunk body + metadata
@@ -89,6 +90,10 @@ Single settings source:
 ```jsonc
 {
   "lmstudio": { "url": "...", "embed_model": "...", "token": "..." },
+  "embeddings": {
+    "backend": "http",         // "http" = lmstudio.url server | "local" = fastembed, in-process
+    "local_model": ""          // fastembed id (e.g. "nomic-ai/nomic-embed-text-v1.5"); empty = derive from lmstudio.embed_model
+  },
   "data_dir": "data",
   "search":   { "top_k": 8, "pool_k": 50, "rrf_k": 60, "use_fts": true },
   "rerank":   { "enabled": true, "model": "cross-encoder/ms-marco-MiniLM-L6-v2", "candidates": 30, "max_tokens": 256 },
@@ -104,6 +109,11 @@ Single settings source:
 ```
 
 The embedding model must match what was used at ingest time — changing it invalidates existing indexes. `config.json` holds an API token: keep it `chmod 600`.
+
+`embeddings.backend` chooses how vectors are computed. Both backends are drop-in equivalent: the canonical model name (`lmstudio.embed_model`, e.g. `text-embedding-nomic-embed-text-v1.5`) and the task prefixes (`search_document: ` / `search_query: `) stay authoritative either way, and the local backend maps it onto fastembed's `nomic-ai/nomic-embed-text-v1.5` fp32 ONNX (same 768-dimensional vectors). Switching backends requires no re-ingest; changing the *model itself* does. Notes:
+- Local weights download once from Hugging Face into fastembed's cache (`FASTEMBED_CACHE_PATH` env relocates it); after that the backend is fully offline.
+- The local path is CPU-only ONNX — same engine family as the reranker, no LM Studio, no torch.
+- fastembed applies no prefixes itself; the plugin keeps doing its own `prep_for_embed()` prefixing on both backends.
 
 ## Development & Packaging
 

@@ -4,6 +4,10 @@
     "embed_model": "text-embedding-nomic-embed-text-v1.5",
     "token": "sk-lm-kFjzYm5h:ToJEAfszjVM8LnU5byqy"
   },
+  "embeddings": {
+    "backend": "local",
+    "local_model": ""
+  },
   "data_dir": "data",
   "search": {
     "top_k": 8,
