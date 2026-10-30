@@ -9,7 +9,8 @@ Environment variables override config values:
     DOCS_RAG_DATA_DIR, RAG_TOP_K, RAG_POOL_K, RAG_RRF_K, RAG_USE_FTS,
     RAG_HTTP_TIMEOUT, RAG_EMBED_BATCH, RAG_CHUNK_CHARS,
     RAG_RERANK_ENABLED, RAG_RERANK_MODEL, RAG_RERANK_CANDIDATES,
-    RAG_RERANK_MAX_TOKENS, RAG_DOC_META_MAX_CHARS
+    RAG_RERANK_MAX_TOKENS, RAG_DOC_META_MAX_CHARS,
+    RAG_EMBED_BACKEND, RAG_EMBED_LOCAL_MODEL
 """
 import json
 import os
@@ -37,6 +38,8 @@ _DEFAULTS = {
     "doc_meta.max_chars": 1500,
     "doc_meta.preamble_sections": ["Abstract"],
     "doc_meta.per_subject": {},
+    "embeddings.backend": "http",       # "http" (OpenAI-compatible server) | "local" (fastembed, in-process)
+    "embeddings.local_model": "",       # fastembed model id; empty = derive from lmstudio.embed_model
 }
 
 _raw_cache = None
@@ -147,6 +150,22 @@ def http_timeout():
 
 def embed_batch():
     return int(get("embed_batch", env="RAG_EMBED_BATCH"))
+
+
+def embed_backend():
+    """
+    How vectors are produced: "http" (POST /embeddings on lmstudio.url) or
+    "local" (fastembed ONNX, in-process). Validated in rag/faiss.py.
+    """
+    return str(get("embeddings.backend", env="RAG_EMBED_BACKEND")).strip().lower()
+
+
+def local_embed_model():
+    """
+    fastembed model id for the local backend (e.g. "nomic-ai/nomic-embed-text-v1.5").
+    Empty means: derive it from lmstudio.embed_model at embed time.
+    """
+    return str(get("embeddings.local_model", env="RAG_EMBED_LOCAL_MODEL")).strip()
 
 
 def chunk_chars():
