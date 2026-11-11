@@ -39,6 +39,8 @@ Python 3 with:
 
 LM Studio must be reachable at the URL in `config.json` when `embeddings.backend` is `"http"` (the default for fresh installs; `"local"` runs offline after a one-time model download). Activate your venv before launching OpenCode so the plugin inherits the correct interpreter.
 
+`config.json` is git-ignored — it carries a private server URL and API token. `config.example.json` is the tracked template: copy it to `config.json` and fill in real values (keep the file chmod 600).
+
 ## Directory Layout
 
 ```
@@ -47,7 +49,7 @@ docs-rag/
 ├── dist/                 # compiled plugin (index, tools, router)
 ├── python/               # ingest/query/forget engines + rag helpers; each tool spawns `python3 <name>.py` with JSON args (128 KiB output cap per call)
 ├── AGENTS.md             # skill: subject-selection routing rules (auto-registered via package.json "opencode.skills")
-├── config.json           # LM Studio + search/rerank settings — holds an API token, keep chmod 600
+├── config.json           # LM Studio + search/rerank settings — holds an API token, keep chmod 600 (git-ignored; template: config.example.json)
 └── data/                 # persistent corpus, indexes; survives plugin upgrades if you preserve it on deploy
     ├── subjects/<subject>/raw|json|index   # source files as ingested · normalized rows (<name>.md.json) · FAISS index for this subject
     ├── models/<model>/                     # cached ONNX reranker weights

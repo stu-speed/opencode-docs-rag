@@ -2,3 +2,9 @@ node_modules/
 package/
 dist/
 data/
+__pycache__/
+.idea/
+
+# Private deployment settings: real server URL + API token. Keep local only;
+# config.example.json is the tracked template.
+config.json

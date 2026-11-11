@@ -1,7 +1,10 @@
 import json
 import os
+import socket
+import time
 import urllib.request
 import urllib.error
+from urllib.parse import urlsplit
 
 import faiss
 import numpy as np
@@ -24,8 +27,45 @@ HTTP_TIMEOUT = http_timeout()
 EMBED_BATCH = embed_batch()
 EMBED_BACKEND = embed_backend()
 
+# Pre-flight probe (used by _http_json): seconds to wait for a TCP connect
+# before declaring the server unreachable, and how long a successful probe
+# stays cached. Deliberately tiny next to HTTP_TIMEOUT: its job is to turn a
+# silent-drop "server down" hang into a fast, readable error.
+CONNECT_PROBE_TIMEOUT = 3.0
+_PROBE_TTL = 60.0
+_probe_ok_at = 0.0         # last successful probe, monotonic clock
+
+
+def _probe_server():
+    """
+    Pre-flight TCP connect to LMSTUDIO_BASE's host:port before an HTTP call.
+    A dead host or firewall that silently drops packets would otherwise hang
+    for the full HTTP_TIMEOUT waiting for the TCP handshake; a refused
+    connection surfaces here in milliseconds with the same friendly message
+    the urlopen handler gives. Successes are cached for _PROBE_TTL so steady
+    streaming of batches pays at most one extra probe per window.
+    """
+    global _probe_ok_at
+    if time.monotonic() - _probe_ok_at < _PROBE_TTL:
+        return
+    parts = urlsplit(LMSTUDIO_BASE)
+    host = parts.hostname
+    if not host:
+        return  # unusual URL — let urlopen handle it
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    try:
+        with socket.create_connection((host, port), timeout=CONNECT_PROBE_TIMEOUT):
+            pass
+    except OSError as e:
+        raise RuntimeError(
+            f"LM Studio unreachable at {LMSTUDIO_BASE} ({e}). "
+            "Start LM Studio and load an embedding model, or set LMSTUDIO_URL."
+        ) from e
+    _probe_ok_at = time.monotonic()
+
 
 def _http_json(url, payload=None):
+    _probe_server()
     headers = {}
     if LMSTUDIO_TOKEN:
         headers["Authorization"] = f"Bearer {LMSTUDIO_TOKEN}"
