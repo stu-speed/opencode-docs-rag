@@ -62,6 +62,7 @@ stage:
         --include="tsconfig.json" \
         --include="src/***" \
         --include="python/***" \
+        --exclude="config.private.json" \
         --exclude="*" \
         ./ $(STAGE_DIR)/
 	# Remove Python caches

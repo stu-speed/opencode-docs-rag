@@ -5,6 +5,6 @@ data/
 __pycache__/
 .idea/
 
-# Private deployment settings: real server URL + API token. Keep local only;
-# config.example.json is the tracked template.
-config.json
+# Private settings overlay: real server URL + API token. Keep local only;
+# the tracked config.json is the safe template that ships in tarballs.
+config.private.json

@@ -3,7 +3,9 @@ Shared configuration for docs-rag.
 
 Loads <package root>/config.json (located from this file's position:
 scripts/rag/config.py -> package root) and exposes typed accessors.
-Environment variables override config values:
+config.private.json, when present, overlays it key-by-key (deep merge);
+the tracked config.json is a safe template, private values live only in
+the overlay. Environment variables override both:
 
     LMSTUDIO_URL, LMSTUDIO_EMBED_MODEL, LMSTUDIO_TOKEN,
     DOCS_RAG_DATA_DIR, RAG_TOP_K, RAG_POOL_K, RAG_RRF_K, RAG_USE_FTS,
@@ -17,7 +19,8 @@ import os
 from pathlib import Path
 
 PKG_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_PATH = PKG_ROOT / "config.json"
+CONFIG_PATH = PKG_ROOT / "config.json"                  # tracked/shipped template
+PRIVATE_CONFIG_PATH = PKG_ROOT / "config.private.json"  # local overlay, git-ignored
 
 _DEFAULTS = {
     "lmstudio.url": "http://localhost:1234/v1",
@@ -45,21 +48,42 @@ _DEFAULTS = {
 _raw_cache = None
 
 
+def _deep_merge(base, overlay):
+    """Recursively merge overlay onto base; overlay keys win, siblings kept."""
+    merged = dict(base)
+    for k, v in overlay.items():
+        if isinstance(v, dict) and isinstance(merged.get(k), dict):
+            merged[k] = _deep_merge(merged[k], v)
+        else:
+            merged[k] = v
+    return merged
+
+
+def _load_layer(path):
+    """One JSON config layer; {} when absent or unreadable (defaults apply)."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            layer = json.load(f)
+        return layer if isinstance(layer, dict) else {}
+    except Exception:
+        return {}
+
+
 def _raw():
     global _raw_cache
     if _raw_cache is None:
-        try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                _raw_cache = json.load(f)
-        except Exception:
-            _raw_cache = {}
+        _raw_cache = _deep_merge(
+            _load_layer(CONFIG_PATH),
+            _load_layer(PRIVATE_CONFIG_PATH),
+        )
     return _raw_cache
 
 
 def get(dotted, env=None):
     """
     Config value by dotted path (e.g. "search.top_k").
-    The env var (if given and set) wins; falls back to built-in defaults.
+    The env var (if given and set) wins; then config.private.json over
+    config.json; falls back to built-in defaults.
     """
     if env:
         v = os.environ.get(env)

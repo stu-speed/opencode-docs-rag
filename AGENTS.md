@@ -34,8 +34,8 @@ verbatim. Do not reconstruct full content from retrieved chunks.
 
 ## Ops
 
-Embedding backend lives in the package `config.json` under `embeddings.backend`:
+Embedding backend lives in the package config under `embeddings.backend`:
 "local" (fastembed, in-process ONNX — works with no server reachable) or "http"
-(LM Studio at `lmstudio.url`). Embedding errors return as text — relay them, don't
-retry blindly. All settings live in the package `config.json` (env vars optionally
-override).
+(LM Studio at `lmstudio.url`). Settings: `config.json` is the tracked template;
+`config.private.json` overrides it key-by-key when present. Embedding errors
+return as text — relay them, don't retry blindly. Env vars optionally override.

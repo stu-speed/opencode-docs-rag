@@ -39,7 +39,7 @@ Python 3 with:
 
 LM Studio must be reachable at the URL in `config.json` when `embeddings.backend` is `"http"` (the default for fresh installs; `"local"` runs offline after a one-time model download). Activate your venv before launching OpenCode so the plugin inherits the correct interpreter.
 
-`config.json` is git-ignored — it carries a private server URL and API token. `config.example.json` is the tracked template: copy it to `config.json` and fill in real values (keep the file chmod 600).
+`config.json` in the repo — and in every tarball — is a safe template (localhost, no token). Your real settings live in `config.private.json`, a git-ignored local overlay merged over the template key-by-key at load time. Keep it `chmod 600`, never commit it, and copy it into the deployed plugin dir next to `index.js`.
 
 ## Directory Layout
 
@@ -49,7 +49,8 @@ docs-rag/
 ├── dist/                 # compiled plugin (index, tools, router)
 ├── python/               # ingest/query/forget engines + rag helpers; each tool spawns `python3 <name>.py` with JSON args (128 KiB output cap per call)
 ├── AGENTS.md             # skill: subject-selection routing rules (auto-registered via package.json "opencode.skills")
-├── config.json           # LM Studio + search/rerank settings — holds an API token, keep chmod 600 (git-ignored; template: config.example.json)
+├── config.json           # settings template — tracked, ships in tarballs (safe defaults)
+├── config.private.json   # your real LM Studio URL/token — git-ignored overlay, keep chmod 600
 └── data/                 # persistent corpus, indexes; survives plugin upgrades if you preserve it on deploy
     ├── subjects/<subject>/raw|json|index   # source files as ingested · normalized rows (<name>.md.json) · FAISS index for this subject
     ├── models/<model>/                     # cached ONNX reranker weights
@@ -85,9 +86,9 @@ Answering etiquette (from the skill): cite sources only when provenance matters;
   - Tables: CSV/TSV, Excel (openpyxl), parquet/feather/ORC, pickle, JSON records — via pandas
 - **Stage 2 — unified rows:** every section or record becomes a row in SQLite + FAISS with `id` = stable content hash, `text` = the section/record as JSON, and leading-context metadata (title, abstract, table columns). Sections longer than `chunk_chars` are split; code fences preserved.
 
-## Configuration (`config.json`)
+## Configuration (`config.json` + `config.private.json`)
 
-Single settings source:
+Single settings source — `config.json` is the tracked template; `config.private.json` (git-ignored) overrides it key-by-key when present:
 
 ```jsonc
 {
@@ -110,7 +111,7 @@ Single settings source:
 }
 ```
 
-The embedding model must match what was used at ingest time — changing it invalidates existing indexes. `config.json` holds an API token: keep it `chmod 600`.
+The embedding model must match what was used at ingest time — changing it invalidates existing indexes. `config.private.json` holds the API token: keep it `chmod 600`.
 
 `embeddings.backend` chooses how vectors are computed. Both backends are drop-in equivalent: the canonical model name (`lmstudio.embed_model`, e.g. `text-embedding-nomic-embed-text-v1.5`) and the task prefixes (`search_document: ` / `search_query: `) stay authoritative either way, and the local backend maps it onto fastembed's `nomic-ai/nomic-embed-text-v1.5` fp32 ONNX (same 768-dimensional vectors). Switching backends requires no re-ingest; changing the *model itself* does. Notes:
 - Local weights download once from Hugging Face into fastembed's cache (`FASTEMBED_CACHE_PATH` env relocates it); after that the backend is fully offline.
@@ -139,8 +140,7 @@ Artifact: `docs-rag-<version>.tgz` in this folder's `dist/`.
 
 ### Deploying a new build
 
-Extract or copy over your existing `~/.opencode/plugins/docs-rag/`, keeping its
-`data/` directory (corpus + indexes) intact — tarballs never contain one. Everything else is code/config and safe to replace; restart OpenCode so the updated plugin loads.
+Extract or copy over your existing `~/.opencode/plugins/docs-rag/`, keeping its `data/` directory (corpus + indexes) and `config.private.json` (your server URL/token) intact — tarballs contain neither; `config.json` ships as the safe template. Everything else is code/config and safe to replace; restart OpenCode so the updated plugin loads.
 
 ## Limitations
 
