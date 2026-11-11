@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import ast
 import csv as csvmod
 import datetime
 import glob
@@ -74,6 +75,35 @@ MARKITDOWN_EXTENSIONS = {".docx", ".pptx", ".html", ".htm", ".epub"}
 
 # Plain text formats (stored as markdown as-is).
 PLAIN_TEXT_EXTENSIONS = {".rst", ".tex", ".adoc", ".org", ".log"}
+
+# Source code: symbol-chunked (ast for Python, column-0 regex otherwise),
+# never table-sniffed. Stored raw under the original filename.
+CODE_EXTENSIONS = {
+    ".py", ".pyw",
+    ".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx",
+    ".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".java", ".kt",
+    ".go", ".rs", ".rb", ".php", ".lua", ".r", ".swift",
+    ".sh", ".bash", ".zsh", ".sql", ".css", ".scss",
+}
+
+# Generated/minified artifacts that look like code but carry no retrievable
+# meaning (ingest takes explicit paths, so this is a per-file name check).
+_CODE_SKIP_RE = re.compile(r"\.min\.[cm]?js$")
+
+# Shebang runtimes that make an extensionless file code (checked before the
+# ambiguous-text table sniff).
+_SHEBANG_CODE_RE = re.compile(r"^#!.*\b(?:python\d?|bash|sh|zsh|ksh|node|ruby|perl|lua)\b")
+
+# Column-0 definition starts for the regex tier. Assumption: top-level
+# definitions start at column 0; indented definitions stay in their block.
+_CODE_DEF_RE = re.compile(
+    r"^(?:async\s+def\s|def\s|class\s|function\s|export\s|pub\s+fn\s|func\s|fn\s|"
+    r"sub\s|struct\s|enum\s|trait\s|impl\s|interface\s|typedef\s|#define\s|"
+    r"[A-Za-z_][\w-]*\s*\(\)\s*\{)"  # shell-style: name() {
+)
+
+# Linter/type-checker directives: never useful chunk context.
+_CODE_DIRECTIVE_RE = re.compile(r"^\s*#\s*(?:noqa|type:\s*ignore|pylint:|mypy:|nosec|fmt:)", re.I)
 
 # Document chunking: merge paragraph blocks under the same section heading up
 # to this many characters (~500 tokens) before starting a new row.
@@ -313,7 +343,17 @@ def detect_and_load(path):
     if ext in DOCUMENT_EXTENSIONS:
         return "raw", convert_document_to_markdown(path)[0]
 
-    # 4. Known delimited text: strict parse, else document.
+    # 4. Code: symbol-chunked, never table-sniffed. Minified artifacts are
+    #    excluded; extensionless scripts qualify via shebang.
+    if (ext in CODE_EXTENSIONS and not _CODE_SKIP_RE.search(path)) or (
+        ext == "" and _SHEBANG_CODE_RE.match(_first_line(path))
+    ):
+        text = read_text(path)
+        if looks_like_binary(text):
+            raise IngestError(f"binary file, cannot ingest as code: {path}")
+        return "code", text
+
+    # 5. Known delimited text: strict parse, else document.
     if ext == ".csv":
         df = try_strict_csv(path, ",")
         if df is not None:
@@ -331,7 +371,7 @@ def detect_and_load(path):
             raise IngestError(f"binary file, cannot ingest as text: {path}")
         return "raw", text
 
-    # 5. Ambiguous text (.txt, no extension, ...): sniff, else document.
+    # 6. Ambiguous text (.txt, no extension, ...): sniff, else document.
     text = read_text(path)
     if looks_like_binary(text):
         raise IngestError(f"binary file, cannot ingest as text: {path}")
@@ -432,11 +472,25 @@ def markdown_blocks(md_text):
 def _split_oversized(block, max_chars):
     """
     Split one oversized block into pieces of at most max_chars, cutting at
-    sentence or line boundaries. Fenced code blocks are never split.
+    sentence or line boundaries. Fenced code blocks are split at line
+    boundaries and re-wrapped so every piece is a closed, valid fence
+    (previously an oversized fence was returned unsplitted, unbounded).
     """
-    stripped = block.lstrip()
-    if stripped.startswith("```") or stripped.startswith("~~~"):
-        return [block]
+    fence = re.match(r"^\s*(`{3,}|~{3,})", block)
+    if fence:
+        opener = block.split("\n", 1)[0].lstrip()  # keep the language tag
+        mark = fence.group(1)
+        lines_ = block.split("\n")
+        inner = lines_[1:-1] if lines_[-1].lstrip().startswith(mark) else lines_[1:]
+        parts, cur, cur_len = [], [], 0
+        for line in inner:
+            if cur and cur_len + len(line) + 1 > max_chars:
+                parts.append("\n".join([opener] + cur + [mark]))
+                cur, cur_len = [], 0
+            cur.append(line)
+            cur_len += len(line) + 1
+        parts.append("\n".join([opener] + cur + [mark]))
+        return parts
     parts = []
     while len(block) > max_chars:
         window = block[:max_chars]
@@ -452,12 +506,12 @@ def _split_oversized(block, max_chars):
     return parts
 
 
-def chunk_document_blocks(blocks, max_chars=None):
+def chunk_document_blocks(blocks, max_chars=None, splitter=_split_oversized):
     """
     Merge consecutive blocks that share a section into rows of at most
     max_chars, never crossing a section boundary. Oversized single blocks
     (e.g. long paragraphs) are split at sentence/line boundaries; fenced
-    code blocks are never split.
+    code blocks are never split mid-fence.
     Returns [(section, content)].
     """
     if max_chars is None:
@@ -474,7 +528,7 @@ def chunk_document_blocks(blocks, max_chars=None):
         cur_sec, cur_parts, cur_len = None, [], 0
 
     for sec, block in blocks:
-        pieces = _split_oversized(block, max_chars) if len(block) > max_chars else [block]
+        pieces = splitter(block, max_chars) if len(block) > max_chars else [block]
         for piece in pieces:
             if sec != cur_sec or (cur_parts and cur_len + len(piece) + 2 > max_chars):
                 flush()
@@ -497,12 +551,158 @@ def build_rows_from_document(md_text, md_name):
     return build_rows_from_table(df, md_name)
 
 
+# ---------------------------------------------------------------------------
+# Code chunking: one row per top-level symbol — ast for exact boundaries in
+# Python, column-0 definition regex elsewhere, module-level runs grouped.
+# ---------------------------------------------------------------------------
+
+def _first_line(path):
+    """First line of a file (shebang probe for extensionless scripts)."""
+    try:
+        with open(path, "rb") as f:
+            return f.readline(256).decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def _symbol_start_line(node):
+    """1-based first line of a Python symbol: def keyword or topmost decorator."""
+    return min([node.lineno] + [d.lineno for d in node.decorator_list])
+
+
+def _attached_comment_lines(lines, def_idx):
+    """
+    Full-line comment lines immediately above lines[def_idx] (no blank line
+    between them and the definition), bottom-up chain broken by blanks or
+    code. Directive-only comments (# noqa ...) are dropped. These are the
+    natural-language context the ast parser cannot see.
+    """
+    out, j = [], def_idx - 1
+    while j >= 0 and lines[j].lstrip().startswith("#"):
+        if not _CODE_DIRECTIVE_RE.match(lines[j]):
+            out.append(lines[j])
+        j -= 1
+    out.reverse()
+    return out
+
+
+def _python_code_blocks(source, name):
+    """
+    (section, block) pairs for Python source: one block per top-level
+    function/class — attached comments, decorators, signature, docstring
+    and body — plus module-level runs (docstring, imports, constants) as
+    '<name> module' rows. Returns None when source does not parse (caller
+    falls back to the regex tier).
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    lines = source.splitlines()
+    blocks = []
+    cursor = 0  # 0-based: first source line not yet claimed
+
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        start = _symbol_start_line(node)
+        comments = _attached_comment_lines(lines, start - 1)
+        sym_first = start - 1 - len(comments)  # 0-based: first attached line
+        if sym_first > cursor:
+            body = "\n".join(lines[cursor:sym_first]).strip("\n")
+            if body:
+                blocks.append((f"{name} module", body))
+        text = "\n".join(comments + lines[start - 1: node.end_lineno]).strip("\n")
+        blocks.append((f"{name} > {node.name}()", text))
+        cursor = node.end_lineno
+    tail = "\n".join(lines[cursor:]).strip("\n")
+    if tail:
+        blocks.append((f"{name} module", tail))
+    return blocks
+
+
+def _regex_code_blocks(source, name):
+    """
+    (section, block) pairs for non-Python (or unparsable) code: split at
+    column-0 definition starts; comment lines directly above a definition
+    (no blank line between) prefix the block; everything else accumulates
+    into '<name> module' rows (before the first definition) or the current
+    definition's block. Column-0 assumption means indented definitions and
+    trailing main-guard code stay with the preceding block.
+    """
+    blocks, cur, cur_sec, pending = [], [], None, []
+
+    def flush():
+        nonlocal cur, cur_sec
+        if cur:
+            body = "\n".join(cur).strip("\n")
+            if body:
+                blocks.append((cur_sec, body))
+        cur = []
+
+    for line in source.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") or stripped.startswith("//"):
+            pending.append(line)
+            continue
+        if _CODE_DEF_RE.match(line):
+            flush()
+            cur_sec = f"{name} > {line.rstrip()[:72]}"
+            cur.extend(pending)
+            cur.append(line)
+        else:
+            if cur_sec is None:
+                cur_sec = f"{name} module"
+            cur.extend(pending)
+            cur.append(line)
+        pending = []
+    flush()
+    return blocks
+
+
+def _split_code_block(block, max_chars):
+    """
+    Split an oversized code block at blank-line boundaries, then line
+    boundaries. No sentence logic — meaningless in code; never cut mid-line.
+    """
+    parts = []
+    while len(block) > max_chars:
+        window = block[:max_chars]
+        cut = window.rfind("\n\n")
+        if cut < max_chars // 2:
+            cut = window.rfind("\n")
+        if cut < max_chars // 2:
+            cut = max_chars
+        parts.append(block[:cut].rstrip("\n"))
+        block = block[cut:].lstrip("\n")
+    if block:
+        parts.append(block)
+    return parts
+
+
+def build_rows_from_code(source, name):
+    """
+    Code rows: symbol-level (section, content) pairs — ast tier for Python,
+    regex tier otherwise — merged/split by the code-aware chunker, then run
+    through the table row builder so code, tables and documents produce
+    identical chunk shapes ({"section","text"} JSON keyed by content hash).
+    """
+    blocks = _python_code_blocks(source, name)
+    if blocks is None:
+        blocks = _regex_code_blocks(source, name)
+    if not blocks:
+        blocks = [(f"{name} module", source.strip())]
+    rows = chunk_document_blocks(blocks, splitter=_split_code_block)
+    df = pd.DataFrame(rows, columns=["section", "text"])
+    return build_rows_from_table(df, name)
+
+
 def write_json(subject, file_path, description, mode, data):
     base, raw_dir, json_dir, index_dir = ensure_subject_dirs(subject)
     src_name = os.path.basename(file_path)
     converted_from = None
 
-    if mode == "table":
+    if mode in ("table", "code"):
         # copy raw file into subject/raw
         raw_target = os.path.join(raw_dir, src_name)
         if os.path.abspath(file_path) != os.path.abspath(raw_target):
@@ -512,8 +712,14 @@ def write_json(subject, file_path, description, mode, data):
             except Exception:
                 pass
         id_name = src_name
-        rows = build_rows_from_table(data, src_name)
-        columns = list(data.columns)
+        if mode == "table":
+            rows = build_rows_from_table(data, src_name)
+            columns = list(data.columns)
+        else:
+            # Code is its own source of truth: symbol chunks keyed by
+            # content hash, original file kept under its own name.
+            rows = build_rows_from_code(data, src_name)
+            columns = ["section", "text"]
     else:
         # Documents are stored as markdown: the editable source of truth.
         md_name = (
@@ -618,7 +824,7 @@ def main(subject, files, description):
             raise FileNotFoundError(f"File not found: {file_path}")
 
         mode, data = detect_and_load(file_path)
-        if mode not in ("csv", "tsv", "json", "txt", "raw"):
+        if mode not in ("csv", "tsv", "json", "txt", "raw", "code"):
             raise ValueError(f"Unsupported ingest mode: {mode}")
 
         payload, json_target, index_dir = write_json(

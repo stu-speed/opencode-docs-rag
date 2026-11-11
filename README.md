@@ -81,9 +81,10 @@ Answering etiquette (from the skill): cite sources only when provenance matters;
 
 ## Ingest Pipeline
 
-- **Stage 1 — normalize:** documents → markdown (`.md`, `.txt` read directly), tables → DataFrame rows
+- **Stage 1 — normalize:** documents → markdown (`.md`, `.txt` read directly), tables → DataFrame rows, code → symbol chunks
   - Documents: `.rst`, `.tex`, `.adoc`, `.org`, `.log`, `.pdf`, `.docx`, `.pptx`, `.html`, `.epub` via markitdown; PDFs through the chain above
   - Tables: CSV/TSV, Excel (openpyxl), parquet/feather/ORC, pickle, JSON records — via pandas
+  - Code (`.py`, `.js`, `.ts`, `.c`, `.go`, `.rs`, `.sh`, …): one row per top-level function/class — attached comments, decorators, signature, docstring and body — with module-level runs (docstring, imports, constants) grouped as `<file> module` rows. Python uses `ast` for exact boundaries; other languages a column-0 definition regex; unparsable source falls back to raw prose. Extensionless scripts qualify via shebang; minified artifacts are skipped.
 - **Stage 2 — unified rows:** every section or record becomes a row in SQLite + FAISS with `id` = stable content hash, `text` = the section/record as JSON, and leading-context metadata (title, abstract, table columns). Sections longer than `chunk_chars` are split; code fences preserved.
 
 ## Configuration (`config.json` + `config.private.json`)
