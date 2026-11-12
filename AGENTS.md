@@ -36,6 +36,11 @@ verbatim. Do not reconstruct full content from retrieved chunks.
 
 Embedding backend lives in the package config under `embeddings.backend`:
 "local" (fastembed, in-process ONNX — works with no server reachable) or "http"
-(LM Studio at `lmstudio.url`). Settings: `config.json` is the tracked template;
-`config.private.json` overrides it key-by-key when present. Embedding errors
-return as text — relay them, don't retry blindly. Env vars optionally override.
+(LM Studio at `lmstudio.url`). `embeddings.fallback_local` (env
+`RAG_EMBED_FALLBACK_LOCAL`, default off) opts in to switching to the local
+backend when http is unreachable — enable it ONLY when the locally mapped
+fastembed model is the same as the server's, or two models' vectors mix in one
+index. The fallback is sticky per process and logs once to stderr. Settings:
+`config.json` is the tracked template; `config.private.json` overrides it
+key-by-key when present. Embedding errors return as text — relay them, don't
+retry blindly. Env vars optionally override.

@@ -6,7 +6,8 @@
   },
   "embeddings": {
     "backend": "local",
-    "local_model": ""
+    "local_model": "",
+    "fallback_local": false
   },
   "data_dir": "data",
   "search": {

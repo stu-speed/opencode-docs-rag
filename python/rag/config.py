@@ -12,7 +12,7 @@ the overlay. Environment variables override both:
     RAG_HTTP_TIMEOUT, RAG_EMBED_BATCH, RAG_CHUNK_CHARS,
     RAG_RERANK_ENABLED, RAG_RERANK_MODEL, RAG_RERANK_CANDIDATES,
     RAG_RERANK_MAX_TOKENS, RAG_DOC_META_MAX_CHARS,
-    RAG_EMBED_BACKEND, RAG_EMBED_LOCAL_MODEL
+    RAG_EMBED_BACKEND, RAG_EMBED_LOCAL_MODEL, RAG_EMBED_FALLBACK_LOCAL
 """
 import json
 import os
@@ -43,6 +43,7 @@ _DEFAULTS = {
     "doc_meta.per_subject": {},
     "embeddings.backend": "http",       # "http" (OpenAI-compatible server) | "local" (fastembed, in-process)
     "embeddings.local_model": "",       # fastembed model id; empty = derive from lmstudio.embed_model
+    "embeddings.fallback_local": False, # opt-in: use local fastembed when the http backend is unreachable
 }
 
 _raw_cache = None
@@ -190,6 +191,19 @@ def local_embed_model():
     Empty means: derive it from lmstudio.embed_model at embed time.
     """
     return str(get("embeddings.local_model", env="RAG_EMBED_LOCAL_MODEL")).strip()
+
+
+def embed_fallback_local():
+    """
+    Opt-in: when the http backend is unreachable, fall back to the local
+    fastembed backend instead of erroring. Must only be enabled when the
+    locally mapped model is compatible with the one the server served at
+    ingest time — otherwise vectors from two models mix in one index.
+    """
+    v = get("embeddings.fallback_local", env="RAG_EMBED_FALLBACK_LOCAL")
+    if isinstance(v, bool):
+        return v
+    return str(v).lower() not in ("0", "false", "no", "")
 
 
 def chunk_chars():

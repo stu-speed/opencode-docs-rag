@@ -1,6 +1,7 @@
 import json
 import os
 import socket
+import sys
 import time
 import urllib.request
 import urllib.error
@@ -12,6 +13,7 @@ import numpy as np
 from .config import (
     embed_backend,
     embed_batch,
+    embed_fallback_local,
     embed_model,
     http_timeout,
     lmstudio_token,
@@ -94,6 +96,27 @@ def _http_json(url, payload=None):
 # ---------------------------------------------------------------------------
 _LOCAL_EMBEDDER = None     # lazy TextEmbedding singleton
 _LOCAL_MODEL_ID = ""       # fastembed model id backing the singleton
+
+# Set to True once an http-embed call has failed and been routed to the local
+# fallback (embeddings.fallback_local). Sticky for the rest of the process:
+# later embeds skip the http probe instead of paying its timeout per batch.
+# Note this means a server that comes back mid-process is not picked up —
+# consistent within-process embeddings matter more here.
+_HTTP_FALLBACK_ACTIVE = False
+_FALLBACK_WARNED = False
+
+
+def _warn_fallback(http_err):
+    """One-time stderr note that embeddings switched to the local backend."""
+    global _FALLBACK_WARNED
+    if not _FALLBACK_WARNED:
+        _FALLBACK_WARNED = True
+        print(
+            f"docs-rag: LM Studio unreachable ({http_err}); "
+            "falling back to local fastembed embeddings for the rest of "
+            "this process (embeddings.fallback_local).",
+            file=sys.stderr,
+        )
 
 
 def _check_backend():
@@ -221,14 +244,39 @@ def embed(texts, model=None, task=None):
 
     task: "document" or "query" — applies the model's task prefix if it has
     one (nomic-embed).
+
+    Fallback: when embeddings.fallback_local is enabled (opt-in — only turn
+    it on when the locally mapped fastembed model is compatible with the
+    server's), an unreachable http backend switches to _embed_local for the
+    rest of the process; with the setting off, the http error propagates.
     """
+    global _HTTP_FALLBACK_ACTIVE
     if isinstance(texts, str):
         texts = [texts]
     model = model or resolve_embed_model()
     prefix = task_prefix(model, task)
     prefixed = [prefix + t for t in texts]
-    if _check_backend() == "local":
+    if _check_backend() == "local" or _HTTP_FALLBACK_ACTIVE:
         return _embed_local(prefixed, model)
+    try:
+        return _embed_http(prefixed, model)
+    except RuntimeError as e:
+        if not embed_fallback_local():
+            raise
+        _HTTP_FALLBACK_ACTIVE = True
+        _warn_fallback(e)
+        try:
+            return _embed_local(prefixed, model)
+        except Exception as local_err:
+            raise RuntimeError(
+                f"{e}\nembeddings.fallback_local is enabled, but the local "
+                f"backend also failed: {local_err}"
+            ) from local_err
+
+
+def _embed_http(prefixed, model):
+    """One /embeddings round trip; raises RuntimeError when the server is
+    unreachable. Returns an L2-normalized float32 array of shape (n, dim)."""
     data = _http_json(
         f"{LMSTUDIO_BASE}/embeddings",
         {"model": model, "input": prefixed},
